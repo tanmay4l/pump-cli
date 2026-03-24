@@ -8,6 +8,7 @@ use crate::core::{constants, global, instructions, pda};
 use crate::output::{self, format};
 use crate::rpc::PumpRpcClient;
 use crate::wallet;
+use crate::wallet::TxOptions;
 
 #[derive(Subcommand)]
 pub enum SwapAction {
@@ -46,20 +47,24 @@ pub enum SwapAction {
     },
 }
 
-pub async fn handle(action: SwapAction, fmt: &OutputFormat) -> anyhow::Result<()> {
+pub async fn handle(
+    action: SwapAction,
+    fmt: &OutputFormat,
+    tx_opts: &TxOptions,
+) -> anyhow::Result<()> {
     match action {
         SwapAction::Buy {
             mint,
             amount,
             slippage,
             key,
-        } => handle_buy(&mint, amount, slippage, key.as_deref(), fmt).await,
+        } => handle_buy(&mint, amount, slippage, key.as_deref(), fmt, tx_opts).await,
         SwapAction::Sell {
             mint,
             amount,
             slippage,
             key,
-        } => handle_sell(&mint, amount, slippage, key.as_deref(), fmt).await,
+        } => handle_sell(&mint, amount, slippage, key.as_deref(), fmt, tx_opts).await,
         SwapAction::Info { mint } => handle_info(&mint, fmt).await,
     }
 }
@@ -70,6 +75,7 @@ async fn handle_buy(
     slippage_bps: u64,
     key_name: Option<&str>,
     fmt: &OutputFormat,
+    tx_opts: &TxOptions,
 ) -> anyhow::Result<()> {
     let mint = Pubkey::from_str(mint_str).context("invalid mint address")?;
     let kp = wallet::keypair::load_active(key_name)?;
@@ -104,7 +110,7 @@ async fn handle_buy(
         &protocol_fee_recipient,
     );
 
-    let sig = wallet::sign_and_send(&client.inner, &kp, vec![ix])?;
+    let sig = wallet::sign_and_send(&client.inner, &kp, vec![ix], tx_opts).await?;
 
     output::emit(
         fmt,
@@ -115,6 +121,8 @@ async fn handle_buy(
             "sol_spent": format::format_sol(sol_lamports),
             "fee": format::format_sol(fee),
             "protocol_fee_recipient": protocol_fee_recipient.to_string(),
+            "mode": tx_opts.mode_label(),
+            "priority_fee": tx_opts.priority_fee,
         }),
         &[
             ("Signature", sig),
@@ -126,6 +134,7 @@ async fn handle_buy(
             ("SOL spent", format::format_sol(sol_lamports)),
             ("Fee", format::format_sol(fee)),
             ("Fee recipient", protocol_fee_recipient.to_string()),
+            ("Mode", tx_opts.mode_label().to_string()),
         ],
     );
 
@@ -138,6 +147,7 @@ async fn handle_sell(
     slippage_bps: u64,
     key_name: Option<&str>,
     fmt: &OutputFormat,
+    tx_opts: &TxOptions,
 ) -> anyhow::Result<()> {
     let mint = Pubkey::from_str(mint_str).context("invalid mint address")?;
     let kp = wallet::keypair::load_active(key_name)?;
@@ -172,7 +182,7 @@ async fn handle_sell(
         &protocol_fee_recipient,
     );
 
-    let sig = wallet::sign_and_send(&client.inner, &kp, vec![ix])?;
+    let sig = wallet::sign_and_send(&client.inner, &kp, vec![ix], tx_opts).await?;
 
     output::emit(
         fmt,
@@ -183,6 +193,8 @@ async fn handle_sell(
             "sol_received": format::format_sol(sol_out),
             "fee": format::format_sol(fee),
             "protocol_fee_recipient": protocol_fee_recipient.to_string(),
+            "mode": tx_opts.mode_label(),
+            "priority_fee": tx_opts.priority_fee,
         }),
         &[
             ("Signature", sig),
@@ -194,6 +206,7 @@ async fn handle_sell(
             ("SOL received", format::format_sol(sol_out)),
             ("Fee", format::format_sol(fee)),
             ("Fee recipient", protocol_fee_recipient.to_string()),
+            ("Mode", tx_opts.mode_label().to_string()),
         ],
     );
 

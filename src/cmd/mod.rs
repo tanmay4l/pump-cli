@@ -4,6 +4,7 @@ pub mod create;
 pub mod info;
 pub mod keys;
 pub mod portfolio;
+pub mod snipe;
 pub mod swap;
 pub mod trade;
 pub mod watch;
@@ -19,6 +20,18 @@ pub struct Cli {
     /// Output format
     #[arg(short, long, global = true, default_value = "table")]
     pub format: OutputFormat,
+
+    /// Priority fee in microlamports per compute unit
+    #[arg(long, global = true)]
+    pub priority_fee: Option<u64>,
+
+    /// Send transaction via Jito block engine
+    #[arg(long, global = true, default_value = "false")]
+    pub jito: bool,
+
+    /// Jito tip in lamports (default: 10000 = 0.00001 SOL)
+    #[arg(long, global = true)]
+    pub jito_tip: Option<u64>,
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -133,6 +146,24 @@ pub enum Commands {
         #[arg(long)]
         address: Option<String>,
     },
+    /// Snipe new pump.fun tokens — auto-buy on creation
+    Snipe {
+        /// Amount of SOL to spend per buy
+        #[arg(long)]
+        amount: f64,
+        /// Slippage tolerance in basis points
+        #[arg(long, default_value = "1000")]
+        slippage: u64,
+        /// Key name to use for signing
+        #[arg(long)]
+        key: Option<String>,
+        /// Minimum SOL in curve to buy (filter out tiny launches)
+        #[arg(long)]
+        min_sol: Option<f64>,
+        /// Maximum SOL in curve to buy (filter out large launches)
+        #[arg(long)]
+        max_sol: Option<f64>,
+    },
     /// Watch live price of a token
     Watch {
         /// Token mint address
@@ -145,6 +176,7 @@ pub enum Commands {
 
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     let fmt = cli.format.clone();
+    let tx_opts = crate::wallet::TxOptions::resolve(cli.priority_fee, cli.jito, cli.jito_tip)?;
 
     match cli.command {
         Commands::Config { action } => config_cmd::handle(action, &fmt).await,
@@ -154,13 +186,13 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             amount,
             slippage,
             key,
-        } => trade::handle_buy(&mint, amount, slippage, key.as_deref(), &fmt).await,
+        } => trade::handle_buy(&mint, amount, slippage, key.as_deref(), &fmt, &tx_opts).await,
         Commands::Sell {
             mint,
             amount,
             slippage,
             key,
-        } => trade::handle_sell(&mint, amount, slippage, key.as_deref(), &fmt).await,
+        } => trade::handle_sell(&mint, amount, slippage, key.as_deref(), &fmt, &tx_opts).await,
         Commands::Info { mint } => info::handle(&mint, &fmt).await,
         Commands::Balance { mint, key, address } => {
             balance::handle(mint.as_deref(), key.as_deref(), address.as_deref(), &fmt).await
@@ -170,7 +202,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             symbol,
             uri,
             key,
-        } => create::handle(&name, &symbol, &uri, key.as_deref(), &fmt).await,
+        } => create::handle(&name, &symbol, &uri, key.as_deref(), &fmt, &tx_opts).await,
         Commands::CreateV2 {
             name,
             symbol,
@@ -178,11 +210,30 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
             key,
             mayhem,
             cashback,
-        } => create::handle_v2(&name, &symbol, &uri, key.as_deref(), mayhem, cashback, &fmt).await,
-        Commands::Swap { action } => swap::handle(action, &fmt).await,
+        } => {
+            create::handle_v2(
+                &name,
+                &symbol,
+                &uri,
+                key.as_deref(),
+                mayhem,
+                cashback,
+                &fmt,
+                &tx_opts,
+            )
+            .await
+        }
+        Commands::Swap { action } => swap::handle(action, &fmt, &tx_opts).await,
         Commands::Portfolio { key, address } => {
             portfolio::handle(key.as_deref(), address.as_deref(), &fmt).await
         }
+        Commands::Snipe {
+            amount,
+            slippage,
+            key,
+            min_sol,
+            max_sol,
+        } => snipe::handle(amount, slippage, key.as_deref(), &tx_opts, min_sol, max_sol).await,
         Commands::Watch { mint, interval } => watch::handle(&mint, interval).await,
     }
 }

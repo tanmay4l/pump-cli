@@ -7,6 +7,7 @@ use crate::core::{constants, global, instructions, pda};
 use crate::output::{self, format};
 use crate::rpc::PumpRpcClient;
 use crate::wallet;
+use crate::wallet::TxOptions;
 
 pub async fn handle_buy(
     mint_str: &str,
@@ -14,6 +15,7 @@ pub async fn handle_buy(
     slippage_bps: u64,
     key_name: Option<&str>,
     fmt: &OutputFormat,
+    tx_opts: &TxOptions,
 ) -> anyhow::Result<()> {
     let mint = Pubkey::from_str(mint_str).context("invalid mint address")?;
     let kp = wallet::keypair::load_active(key_name)?;
@@ -41,7 +43,7 @@ pub async fn handle_buy(
         &fee_recipient,
     );
 
-    let sig = wallet::sign_and_send(&client.inner, &kp, vec![ix])?;
+    let sig = wallet::sign_and_send(&client.inner, &kp, vec![ix], tx_opts).await?;
 
     output::emit(
         fmt,
@@ -53,6 +55,8 @@ pub async fn handle_buy(
             "fee": format::format_sol(fee),
             "token_program": token_program.to_string(),
             "fee_recipient": fee_recipient.to_string(),
+            "mode": tx_opts.mode_label(),
+            "priority_fee": tx_opts.priority_fee,
         }),
         &[
             ("Signature", sig),
@@ -64,6 +68,7 @@ pub async fn handle_buy(
             ("SOL spent", format::format_sol(sol_cost)),
             ("Fee", format::format_sol(fee)),
             ("Fee recipient", fee_recipient.to_string()),
+            ("Mode", tx_opts.mode_label().to_string()),
         ],
     );
 
@@ -76,6 +81,7 @@ pub async fn handle_sell(
     slippage_bps: u64,
     key_name: Option<&str>,
     fmt: &OutputFormat,
+    tx_opts: &TxOptions,
 ) -> anyhow::Result<()> {
     let mint = Pubkey::from_str(mint_str).context("invalid mint address")?;
     let kp = wallet::keypair::load_active(key_name)?;
@@ -102,7 +108,7 @@ pub async fn handle_sell(
         &fee_recipient,
     );
 
-    let sig = wallet::sign_and_send(&client.inner, &kp, vec![ix])?;
+    let sig = wallet::sign_and_send(&client.inner, &kp, vec![ix], tx_opts).await?;
 
     output::emit(
         fmt,
@@ -114,6 +120,8 @@ pub async fn handle_sell(
             "fee": format::format_sol(fee),
             "token_program": token_program.to_string(),
             "fee_recipient": fee_recipient.to_string(),
+            "mode": tx_opts.mode_label(),
+            "priority_fee": tx_opts.priority_fee,
         }),
         &[
             ("Signature", sig),
@@ -125,6 +133,7 @@ pub async fn handle_sell(
             ("SOL received", format::format_sol(sol_output)),
             ("Fee", format::format_sol(fee)),
             ("Fee recipient", fee_recipient.to_string()),
+            ("Mode", tx_opts.mode_label().to_string()),
         ],
     );
 

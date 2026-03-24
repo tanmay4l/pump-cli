@@ -5,6 +5,7 @@ use crate::core::instructions;
 use crate::output;
 use crate::rpc::PumpRpcClient;
 use crate::wallet;
+use crate::wallet::TxOptions;
 
 pub async fn handle(
     name: &str,
@@ -12,8 +13,9 @@ pub async fn handle(
     uri: &str,
     key_name: Option<&str>,
     fmt: &OutputFormat,
+    tx_opts: &TxOptions,
 ) -> anyhow::Result<()> {
-    eprintln!("Warning: using legacy create path. Consider --v2 for new token creation.");
+    eprintln!("Warning: using legacy create path. Consider create-v2 for new tokens.");
 
     let kp = wallet::keypair::load_active(key_name)?;
     let client = PumpRpcClient::new()?;
@@ -23,46 +25,42 @@ pub async fn handle(
 
     let ix = instructions::build_create_ix(&kp.pubkey(), &mint_pubkey, name, symbol, uri);
 
-    let recent_blockhash = client.inner.get_latest_blockhash()?;
-    let ixs = vec![
-        solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(200_000),
-        ix,
-    ];
-    let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
-        &ixs,
-        Some(&kp.pubkey()),
+    let sig = wallet::build_and_send(
+        &client.inner,
+        &kp,
         &[&kp, &mint],
-        recent_blockhash,
-    );
-
-    let sig = client
-        .inner
-        .send_and_confirm_transaction(&tx)
-        .map_err(|e| anyhow::anyhow!("transaction failed: {}", e))?;
+        vec![ix],
+        200_000,
+        tx_opts,
+    )
+    .await?;
 
     output::emit(
         fmt,
         &serde_json::json!({
-            "signature": sig.to_string(),
+            "signature": sig,
             "mint": mint_pubkey.to_string(),
             "name": name,
             "symbol": symbol,
             "uri": uri,
             "version": "v1_legacy",
+            "mode": tx_opts.mode_label(),
         }),
         &[
-            ("Signature", sig.to_string()),
+            ("Signature", sig),
             ("Mint", mint_pubkey.to_string()),
             ("Name", name.to_string()),
             ("Symbol", symbol.to_string()),
             ("URI", uri.to_string()),
             ("Version", "v1 (legacy)".to_string()),
+            ("Mode", tx_opts.mode_label().to_string()),
         ],
     );
 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_v2(
     name: &str,
     symbol: &str,
@@ -71,6 +69,7 @@ pub async fn handle_v2(
     is_mayhem_mode: bool,
     is_cashback_enabled: bool,
     fmt: &OutputFormat,
+    tx_opts: &TxOptions,
 ) -> anyhow::Result<()> {
     let kp = wallet::keypair::load_active(key_name)?;
     let client = PumpRpcClient::new()?;
@@ -91,27 +90,20 @@ pub async fn handle_v2(
         is_cashback_enabled,
     );
 
-    let recent_blockhash = client.inner.get_latest_blockhash()?;
-    let ixs = vec![
-        solana_sdk::compute_budget::ComputeBudgetInstruction::set_compute_unit_limit(300_000),
-        ix,
-    ];
-    let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
-        &ixs,
-        Some(&kp.pubkey()),
+    let sig = wallet::build_and_send(
+        &client.inner,
+        &kp,
         &[&kp, &mint],
-        recent_blockhash,
-    );
-
-    let sig = client
-        .inner
-        .send_and_confirm_transaction(&tx)
-        .map_err(|e| anyhow::anyhow!("transaction failed: {}", e))?;
+        vec![ix],
+        300_000,
+        tx_opts,
+    )
+    .await?;
 
     output::emit(
         fmt,
         &serde_json::json!({
-            "signature": sig.to_string(),
+            "signature": sig,
             "mint": mint_pubkey.to_string(),
             "name": name,
             "symbol": symbol,
@@ -121,9 +113,10 @@ pub async fn handle_v2(
             "mayhem_program": crate::core::constants::MAYHEM_PROGRAM_ID.to_string(),
             "is_mayhem_mode": is_mayhem_mode,
             "is_cashback_enabled": is_cashback_enabled,
+            "mode": tx_opts.mode_label(),
         }),
         &[
-            ("Signature", sig.to_string()),
+            ("Signature", sig),
             ("Mint", mint_pubkey.to_string()),
             ("Name", name.to_string()),
             ("Symbol", symbol.to_string()),
@@ -142,6 +135,7 @@ pub async fn handle_v2(
                 "Cashback",
                 if is_cashback_enabled { "Yes" } else { "No" }.to_string(),
             ),
+            ("Mode", tx_opts.mode_label().to_string()),
         ],
     );
 

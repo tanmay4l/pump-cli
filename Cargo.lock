@@ -2636,6 +2636,8 @@ name = "pump-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "bincode",
  "bip39",
  "borsh 1.6.1",
  "bs58",
@@ -2644,10 +2646,12 @@ dependencies = [
  "comfy-table",
  "dirs",
  "rand 0.8.5",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "solana-client",
+ "solana-pubsub-client",
  "solana-sdk",
  "spl-associated-token-account",
  "spl-token",

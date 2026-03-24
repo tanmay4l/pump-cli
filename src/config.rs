@@ -14,6 +14,10 @@ pub struct Settings {
     pub active_key: String,
     #[serde(default = "default_output")]
     pub output: String,
+    #[serde(default)]
+    pub priority_fee: Option<u64>,
+    #[serde(default)]
+    pub jito_tip: Option<u64>,
 }
 
 fn default_rpc() -> String {
@@ -34,6 +38,8 @@ impl Default for Settings {
             rpc_url: default_rpc(),
             active_key: default_key(),
             output: default_output(),
+            priority_fee: None,
+            jito_tip: None,
         }
     }
 }
