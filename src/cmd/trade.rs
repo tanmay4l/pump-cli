@@ -3,11 +3,31 @@ use solana_sdk::{pubkey::Pubkey, signer::Signer};
 use std::str::FromStr;
 
 use crate::cmd::OutputFormat;
-use crate::core::{constants, global, instructions, pda};
+use crate::core::{constants, global, instructions, pda, token_accounts};
 use crate::output::{self, format};
 use crate::rpc::PumpRpcClient;
 use crate::wallet;
 use crate::wallet::TxOptions;
+
+pub enum SellAmount {
+    Exact(f64),
+    Percent(u8),
+    All,
+}
+
+impl SellAmount {
+    pub fn resolve(amount: Option<f64>, percent: Option<u8>, all: bool) -> anyhow::Result<Self> {
+        if all {
+            Ok(SellAmount::All)
+        } else if let Some(pct) = percent {
+            Ok(SellAmount::Percent(pct))
+        } else if let Some(amt) = amount {
+            Ok(SellAmount::Exact(amt))
+        } else {
+            anyhow::bail!("specify --amount, --percent, or --all")
+        }
+    }
+}
 
 pub async fn handle_buy(
     mint_str: &str,
@@ -77,7 +97,7 @@ pub async fn handle_buy(
 
 pub async fn handle_sell(
     mint_str: &str,
-    token_amount_f: f64,
+    sell_amount: SellAmount,
     slippage_bps: u64,
     key_name: Option<&str>,
     fmt: &OutputFormat,
@@ -93,7 +113,25 @@ pub async fn handle_sell(
     let token_program = client.detect_mint_program(&mint)?;
     let fee_recipient = global::select_pump_fee_recipient(&client.inner);
 
-    let token_amount = (token_amount_f * 10_f64.powi(constants::TOKEN_DECIMALS as i32)) as u64;
+    let token_amount = match sell_amount {
+        SellAmount::Exact(f) => (f * 10_f64.powi(constants::TOKEN_DECIMALS as i32)) as u64,
+        SellAmount::Percent(pct) => {
+            let ata = token_accounts::get_ata(&kp.pubkey(), &mint, &token_program);
+            let balance = client.get_token_balance(&ata)?;
+            if balance == 0 {
+                anyhow::bail!("no tokens to sell");
+            }
+            balance * (pct as u64) / 100
+        }
+        SellAmount::All => {
+            let ata = token_accounts::get_ata(&kp.pubkey(), &mint, &token_program);
+            let balance = client.get_token_balance(&ata)?;
+            if balance == 0 {
+                anyhow::bail!("no tokens to sell");
+            }
+            balance
+        }
+    };
 
     let (sol_output, fee) = curve.calculate_sell_output(token_amount)?;
     let min_sol_output = sol_output - (sol_output * slippage_bps / 10_000);

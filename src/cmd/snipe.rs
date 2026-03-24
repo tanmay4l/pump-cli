@@ -7,10 +7,27 @@ use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signer::Signer;
 use std::str::FromStr;
 
-use crate::core::{constants, global, instructions, pda};
+use crate::core::{constants, global, instructions, pda, rug_check};
 use crate::output::format;
 use crate::wallet;
 use crate::wallet::TxOptions;
+
+pub struct SnipeRugConfig {
+    pub min_creator_sol: Option<u64>,
+    pub min_creator_txns: Option<usize>,
+    pub reject_freeze: bool,
+}
+
+pub struct SnipeConfig<'a> {
+    pub sol_amount: f64,
+    pub slippage_bps: u64,
+    pub key_name: Option<&'a str>,
+    pub rotate_keys: bool,
+    pub tx_opts: &'a TxOptions,
+    pub min_sol: Option<f64>,
+    pub max_sol: Option<f64>,
+    pub rug_cfg: Option<SnipeRugConfig>,
+}
 
 /// Convert an HTTP RPC URL to its websocket equivalent.
 fn rpc_to_ws(rpc_url: &str) -> String {
@@ -107,24 +124,57 @@ fn known_program(pk: &Pubkey) -> bool {
         || *pk == constants::MAYHEM_PROGRAM_ID
 }
 
-pub async fn handle(
-    sol_amount: f64,
-    slippage_bps: u64,
+/// Load wallets: either a single key or all keys for rotation.
+fn load_wallets(
     key_name: Option<&str>,
-    tx_opts: &TxOptions,
-    min_sol: Option<f64>,
-    max_sol: Option<f64>,
-) -> anyhow::Result<()> {
+    rotate: bool,
+) -> anyhow::Result<Vec<(String, solana_sdk::signature::Keypair)>> {
+    if rotate {
+        let key_list = wallet::list_keys()?;
+        if key_list.is_empty() {
+            anyhow::bail!("no keys found for rotation — run `pump keys generate` first");
+        }
+        let mut wallets = Vec::new();
+        for (name, _) in &key_list {
+            let kp = wallet::load_keypair(name)?;
+            wallets.push((name.clone(), kp));
+        }
+        Ok(wallets)
+    } else {
+        let settings = crate::config::load()?;
+        let name = key_name.unwrap_or(&settings.active_key).to_string();
+        let kp = wallet::load_keypair(&name)?;
+        Ok(vec![(name, kp)])
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn handle(cfg: SnipeConfig<'_>) -> anyhow::Result<()> {
     let settings = crate::config::load()?;
     let ws_url = rpc_to_ws(&settings.rpc_url);
     let rpc_client = RpcClient::new(&settings.rpc_url);
-    let kp = wallet::keypair::load_active(key_name)?;
+    let wallets = load_wallets(cfg.key_name, cfg.rotate_keys)?;
+    let tx_opts = cfg.tx_opts;
+    let slippage_bps = cfg.slippage_bps;
+    let min_sol = cfg.min_sol;
+    let max_sol = cfg.max_sol;
+    let rug_cfg = cfg.rug_cfg;
 
-    let sol_lamports = (sol_amount * constants::LAMPORTS_PER_SOL as f64) as u64;
+    let sol_lamports = (cfg.sol_amount * constants::LAMPORTS_PER_SOL as f64) as u64;
 
     println!("{} for new pump.fun tokens...", "Sniping".green().bold());
-    println!("  Wallet:   {}", kp.pubkey());
-    println!("  Amount:   {} SOL", sol_amount);
+    if wallets.len() == 1 {
+        println!("  Wallet:   {}", wallets[0].1.pubkey());
+    } else {
+        println!(
+            "  Wallets:  {} keys (round-robin)",
+            wallets.len().to_string().cyan()
+        );
+        for (name, kp) in &wallets {
+            println!("    {} → {}", name, kp.pubkey());
+        }
+    }
+    println!("  Amount:   {} SOL per buy", cfg.sol_amount);
     println!("  Slippage: {} bps", slippage_bps);
     println!("  Mode:     {}", if tx_opts.jito { "Jito" } else { "RPC" });
     if tx_opts.priority_fee > 0 {
@@ -135,6 +185,9 @@ pub async fn handle(
     }
     if let Some(max) = max_sol {
         println!("  Max curve SOL: {max}");
+    }
+    if rug_cfg.is_some() {
+        println!("  Rug check: {}", "enabled".yellow());
     }
     println!("  {}", "Ctrl+C to stop".dimmed());
     println!();
@@ -154,6 +207,8 @@ pub async fn handle(
         "{}",
         "Connected to websocket. Watching for new token creates...".green()
     );
+
+    let mut wallet_idx: usize = 0;
 
     for log_response in receiver {
         let logs = &log_response.value.logs;
@@ -248,6 +303,31 @@ pub async fn handle(
             curve.market_cap_sol()
         );
 
+        // Rug check (if enabled)
+        if let Some(ref cfg) = rug_cfg {
+            let rc = rug_check::RugCheckConfig {
+                min_creator_sol: cfg.min_creator_sol.or(Some(50_000_000)),
+                min_creator_txns: cfg.min_creator_txns.or(Some(5)),
+                reject_mint_authority: false,
+                reject_freeze_authority: cfg.reject_freeze,
+            };
+            let report = rug_check::check(&rpc_client, &mint, &curve.creator, &rc);
+            println!(
+                "  Creator: {} | bal: {:.4} SOL | txns: {}",
+                curve.creator,
+                report.creator_sol_balance as f64 / 1e9,
+                report.creator_tx_count,
+            );
+            if !report.is_safe() {
+                for w in &report.warnings {
+                    println!("  {} {}", "⚠ RUG".red().bold(), w);
+                }
+                println!("  {} Skipped by rug filter", "⏭".dimmed());
+                continue;
+            }
+            println!("  {} Passed rug checks", "✓".green());
+        }
+
         // Calculate buy
         let token_amount = match curve.tokens_for_sol(sol_lamports) {
             Ok(t) => t,
@@ -273,6 +353,10 @@ pub async fn handle(
 
         let fee_recipient = global::select_pump_fee_recipient(&rpc_client);
 
+        // Select wallet (round-robin if rotating)
+        let (ref wallet_name, ref kp) = wallets[wallet_idx % wallets.len()];
+        wallet_idx += 1;
+
         let ix = instructions::build_buy_ix(
             &kp.pubkey(),
             &mint,
@@ -283,19 +367,31 @@ pub async fn handle(
             &fee_recipient,
         );
 
+        let wallet_label = if wallets.len() > 1 {
+            format!(" [{}]", wallet_name)
+        } else {
+            String::new()
+        };
+
         println!(
-            "  {} Buying {} tokens for ~{} SOL...",
+            "  {} Buying {} tokens for ~{} SOL...{}",
             "→".green().bold(),
             format::format_tokens(token_amount, constants::TOKEN_DECIMALS),
             format::format_sol(sol_cost),
+            wallet_label.cyan(),
         );
 
-        match wallet::sign_and_send(&rpc_client, &kp, vec![ix], tx_opts).await {
+        match wallet::sign_and_send(&rpc_client, kp, vec![ix], tx_opts).await {
             Ok(buy_sig) => {
-                println!("  {} Bought! sig: {}", "✓".green().bold(), buy_sig);
+                println!(
+                    "  {} Bought! sig: {}{}",
+                    "✓".green().bold(),
+                    buy_sig,
+                    wallet_label.cyan()
+                );
             }
             Err(e) => {
-                println!("  {} Buy failed: {e}", "✗".red());
+                println!("  {} Buy failed: {e}{}", "✗".red(), wallet_label);
             }
         }
     }
