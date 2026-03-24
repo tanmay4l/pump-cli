@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --tests -- -D warnings
+
+      - name: IDL parity tests
+        run: cargo test --test idl_discriminators --test idl_account_counts --test idl_account_wiring --test idl_layout_guards -- --nocapture
+
+      # Mainnet RPC tests — may fail on rate limits, non-blocking
+      - name: Mainnet RPC tests
+        run: cargo test --test simulate_mainnet -- --nocapture
+        continue-on-error: true
+
+  smoke:
+    name: smoke tests
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Smoke tests
+        run: bash tests/smoke.sh
+        continue-on-error: true
